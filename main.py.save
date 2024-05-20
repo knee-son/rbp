@@ -1,0 +1,93 @@
+from picamera2 import Picamera2
+import time
+import random
+import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
+import pytz
+import board
+import adafruit_dht
+import RPi.GPIO as GPIO
+
+location_image = '/home/phenom/Pictures/test.jpg'
+location_cred  = '/home/phenom/Documents/phenom-c0a0c-firebase-adminsdk-3yjmf-17bb5b392b.json'
+
+cred = credentials.Certificate(location_cred)
+firebase_admin.initialize_app(cred, {'storageBucket': 'phenom-c0a0c.appspot.com'})
+db = firestore.client()
+ref_sensor = db.collection('data').document('sensor')
+ref_camera = db.collection('data').document('camera')
+
+tz = pytz.timezone('Asia/Manila')
+no_sensor = False
+
+picam2 = Picamera2()
+camera_config = picam2.create_preview_configuration()
+picam2.configure(camera_config)
+picam2.start()
+
+dhtDevice = adafruit_dht.DHT22(board.D14)
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(2, GPIO.OUT)
+GPIO.setup(3, GPIO.OUT)
+GPIO.output(2, GPIO.HIGH)
+GPIO.output(3, GPIO.HIGH)
+
+def capture_image():
+    tz = pytz.timezone('Asia/Manila')
+    current_time = datetime.datetime.now(tz)
+    filename = current_time.strftime('%Y-%m-%d_%H-%M-%S.jpg')
+    time.sleep(2)
+    picam2.capture_file(location_image, format='png')
+
+    bucket = storage.bucket()
+    blob = bucket.blob(filename)
+    blob.upload_from_filename(location_image)
+    image_url = blob.generate_signed_url(datetime.timedelta(seconds=300), method='GET')
+    
+    ref_camera.set({
+        'capturing': False,
+        'filename': filename,
+    })
+
+while True:
+
+    current_time = datetime.datetime.now(tz)
+    if no_sensor:
+        temperature = random.uniform(35.0, 39.0)
+        humidity = random.uniform(55.0, 75.0)
+        msg = 'Sensor not found. Sending pseudodata.'
+    else:
+        try:
+            temperature = dhtDevice.temperature
+            humidity = dhtDevice.humidity
+            msg = ''
+        except Exception as error:
+            no_sensor = False
+            print(error)
+            msg = str(error).replace(' Try again.', '')
+            time.sleep(5.0)
+            continue
+
+    print("Temp: {:.2f} C    Humidity: {:.2f}% Time:{:}"
+        .format(temperature, humidity, current_time))
+    if temperature < 37.0:
+        GPIO.output(2,GPIO.HIGH)
+        print('fan is on')
+    else:
+        GPIO.output(2,GPIO.LOW)
+        print('fan is off')
+
+    data  = ref_camera.get().to_dict()
+    if data['capturing'] == True:
+        capture_image()
+
+    ref_sensor.set({
+        'time': current_time,
+        'temperature': temperature,
+        'humidity': humidity,
+        'message': msg,
+    })
+    
+    time.sleep(5.0)
